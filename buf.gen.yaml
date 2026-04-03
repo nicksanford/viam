@@ -1,0 +1,12 @@
+version: v2
+clean: true
+
+inputs:
+  - module: buf.build/viamrobotics/api
+
+plugins:
+  - local: protoc-gen-elixir
+    out: lib/viam_sdk/gen
+    opt:
+      - plugins=grpc
+    strategy: all

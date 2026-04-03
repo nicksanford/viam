@@ -8,8 +8,7 @@ defmodule ViamSdk.RobotTest do
     start_supervised!(child_spec)
     {:ranch_embedded_sup, listener_ref} = child_spec.id
     port = :ranch.get_port(listener_ref)
-    {:ok, robot} = ViamSdk.connect("localhost:#{port}", transport: :grpc)
-    on_exit(fn -> if Process.alive?(robot), do: GenServer.stop(robot) end)
+    robot = start_supervised!({ViamSdk.Robot, address: "localhost:#{port}"})
     {:ok, robot: robot}
   end
 

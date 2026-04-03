@@ -1,0 +1,57 @@
+{
+  "network": {
+    "bind_address": ":0"
+  },
+  "components": [
+    {
+      "name": "sensor1",
+      "model": "fake",
+      "api": "rdk:component:sensor",
+      "attributes": {}
+    },
+    {
+      "name": "arm1",
+      "model": "fake",
+      "api": "rdk:component:arm",
+      "attributes": {
+        "arm-model": "fake"
+      }
+    },
+    {
+      "name": "motor1",
+      "model": "fake",
+      "api": "rdk:component:motor",
+      "attributes": {}
+    },
+    {
+      "name": "base1",
+      "model": "fake",
+      "api": "rdk:component:base",
+      "attributes": {}
+    },
+    {
+      "name": "camera1",
+      "model": "fake",
+      "api": "rdk:component:camera",
+      "attributes": {}
+    },
+    {
+      "name": "gripper1",
+      "model": "fake",
+      "api": "rdk:component:gripper",
+      "attributes": {}
+    },
+    {
+      "name": "movement_sensor1",
+      "model": "fake",
+      "api": "rdk:component:movement_sensor",
+      "attributes": {}
+    },
+    {
+      "name": "power_sensor1",
+      "model": "fake",
+      "api": "rdk:component:power_sensor",
+      "attributes": {}
+    }
+  ]
+}

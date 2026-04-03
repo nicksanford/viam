@@ -4,11 +4,9 @@
 
 Viam is a robotics platform where `viam-server` runs on the robot and exposes a gRPC API for controlling components (sensors, motors, cameras, etc.). The SDK covers three distinct roles:
 
-- **Phase 1** — SDK *client*: connect to a local `viam-server` over direct gRPC and read a sensor
+- **Phase 1** — SDK *client*: connect to a local `viam-server` over direct gRPC and read a sensor ✅
 - **Phase 2** — WebRTC transport: connect to remote robots via the Viam cloud signaling relay
 - **Phase 3** — Module *server*: host custom resources in Elixir, packaged as self-contained binaries
-
-Starting from bare `mix new` scaffold at `/home/user/viam_sdk/`.
 
 ---
 
@@ -44,7 +42,7 @@ version: v2
 clean: true
 
 inputs:
-  - buf.build/viamrobotics/api
+  - module: buf.build/viamrobotics/api
 
 plugins:
   - local: protoc-gen-elixir
@@ -52,7 +50,7 @@ plugins:
     opt:
       - plugins=grpc
     strategy: all   # REQUIRED: Elixir plugin needs all files in one pass
-    include_imports: true
+    # Note: do NOT set include_imports: true — conflicts with the googleapis hex dep
 ```
 
 ### Regenerate stubs
@@ -64,24 +62,35 @@ Generated output committed to `lib/viam_sdk/gen/`. README documents the full wor
 
 ---
 
-## Phase 1: Direct gRPC Client
+## Phase 1: Direct gRPC Client ✅
 
-### File Structure
+### Implemented Files
 ```
 mix.exs                             ← :grpc, :protobuf deps; :mod → ViamSdk.Application
-buf.gen.yaml
+buf.gen.yaml                        ← buf codegen config (57 generated files)
 README.md
 lib/
-  viam_sdk.ex                       ← public API
+  viam_sdk.ex                       ← public API with @moduledoc/@doc/@spec
   viam_sdk/
-    application.ex                  ← starts ViamSdk.RobotSupervisor (DynamicSupervisor)
-    robot.ex                        ← GenServer owning GRPC.Channel
-    gen/                            ← buf-generated stubs (committed)
+    application.ex                  ← starts GRPC.Client.Supervisor + ViamSdk.RobotSupervisor
+    robot.ex                        ← GenServer owning GRPC.Channel; decodes Google.Protobuf.Value
+    gen/                            ← buf-generated stubs (57 files, committed)
+test/
+  fixtures/fake_robot.json          ← robot config with 8 fake components for e2e tests
+  support/
+    fake_robot_server.ex            ← in-process fake RobotService (uses GRPC.Server.Supervisor)
+    fake_sensor_server.ex           ← in-process fake SensorService
+    server_helpers.ex               ← start_server/1 helper (unused after refactor, kept for reference)
+    viam_server_helper.ex           ← starts real viam-server, captures OS PID, SIGTERM/SIGKILL cleanup
+  viam_sdk/
+    robot_test.exs                  ← connect, resource_names
+    sensor_test.exs                 ← get_readings, value decoding
+    integration_test.exs            ← @tag :integration; tests against real viam-server
 ```
 
 ### Supervision Architecture
 
-`ViamSdk.Application` starts `ViamSdk.RobotSupervisor` (a `DynamicSupervisor`).
+`ViamSdk.Application` starts `GRPC.Client.Supervisor` (required by grpc lib) and `ViamSdk.RobotSupervisor` (a `DynamicSupervisor`).
 
 **Easy path — SDK supervises:**
 ```elixir
@@ -97,46 +106,42 @@ ViamSdk.Robot.resource_names(:my_robot)
 
 ### Public API
 
-`connect/2` takes the URI as the first argument and a keyword list for options. Transport is required via the `:transport` key:
+`connect/2` takes the URI as the first argument and a keyword list for options. `:transport` is required:
 
 ```elixir
-# Phase 1: direct gRPC over TCP
 {:ok, robot} = ViamSdk.connect("localhost:8080", transport: :grpc)
-
-# Phase 2: WebRTC (future)
-{:ok, robot} = ViamSdk.connect("robot-name.viam.cloud",
-  transport: :webrtc,
-  credentials: %{type: :api_key, key: "..."}
-)
-
 {:ok, names} = ViamSdk.resource_names(robot)
 {:ok, data}  = ViamSdk.get_readings(robot, "my-sensor")
 ```
 
-`connect/2` dispatches on `transport:` option; each clause starts the appropriate `ViamSdk.Robot` variant under `ViamSdk.RobotSupervisor`.
+### Key Implementation Notes
 
-### Documentation & Specs
-
-All public modules and functions must have:
-- `@moduledoc` on every module
-- `@doc` on every public function
-- `@spec` on every public function
-
-This applies to `ViamSdk`, `ViamSdk.Robot`, and all Phase 3 public modules.
+- Proto messages are plain Elixir structs — use `%Module{}` syntax, not `.new()`
+- `GRPC.Client.Supervisor` must be in the supervision tree (added to `ViamSdk.Application`)
+- Sensor readings use `Viam.Common.V1.GetReadingsRequest/Response` (not sensor-specific messages)
+- `buf.gen.yaml` does **not** use `include_imports: true` — would redefine modules already provided by the `googleapis` hex dep
+- `Google.Protobuf.Value` decoded to native Elixir types in `ViamSdk.Robot.decode_value/1`
+- In-process test servers use `GRPC.Server.Supervisor.child_spec/2` + `start_supervised!/1` — cleaner than manual `GRPC.Server.start/stop`
+- `ViamServerHelper` captures the OS PID before the port owner exits; uses SIGTERM → SIGKILL with timeout for cleanup
 
 ---
 
-## Phase 2: WebRTC Transport (deferred)
+## Phase 2: WebRTC Transport (next)
 
 Viam's WebRTC transport is **not** standard HTTP/2 gRPC — it uses a custom multiplexing protocol over SCTP data channels (`proto/rpc/webrtc/v1/grpc.proto` in `go.viam.com/utils`):
 
 - One reliable ordered data channel named `"rpc"`
 - 4-byte big-endian length-prefixed protobuf `Request`/`Response` frames
 - Each frame has a `stream` ID for call multiplexing
+- `RequestHeaders` → start call, `RequestMessage` → body, `ResponseTrailers` → end call
 
-New modules:
-- `ViamSdk.WebRTC.Signaling` – HTTP signaling client (SDP offer/answer + ICE candidates)
+New modules needed:
+- `ViamSdk.WebRTC.Signaling` – HTTP signaling client (SDP offer/answer + ICE candidates to local viam-server or app.viam.com)
 - `ViamSdk.WebRTC.Channel` – GenServer implementing the multiplexing protocol over the data channel
+
+Additional proto definitions needed (from `go.viam.com/utils`, not in `buf.build/viamrobotics/api`):
+- `proto/rpc/webrtc/v1/signaling.proto` — `SignalingService` (Call, CallUpdate, Answer, etc.)
+- `proto/rpc/webrtc/v1/grpc.proto` — `Request`/`Response` multiplexing frames
 
 ---
 
@@ -153,9 +158,8 @@ Modules are external processes that host custom resource types. The lifecycle:
 5. Module implements the component/service gRPC *server* for each registered resource
 
 ### Key Proto Files for Phase 3
-Generated by `buf generate` from the same API:
-- `viam/module/v1/module.pb.ex` + `module_service.grpc.pb.ex` — module lifecycle RPCs
-- Component server stubs (e.g. `SensorService`) — module implements these as gRPC server
+Already generated by `buf generate`:
+- `lib/viam_sdk/gen/module/v1/module.pb.ex` — module lifecycle messages + `ModuleService` stubs
 
 ### Architecture
 
@@ -183,154 +187,95 @@ lib/viam_sdk/
 examples/
   my_module/
     lib/
-      my_module.ex                  ← OTP Application module entry point
+      my_module.ex                  ← OTP Application entry point
       my_module/
-        application.ex              ← OTP Application module for the example
+        application.ex              ← OTP Application module
         my_sensor.ex                ← Sensor resource implementing ViamSdk.Module.Resource
     mix.exs                         ← Mix project with :viam_sdk path dep + :burrito
 ```
 
 ### Burrito Packaging
 
-**Burrito** (hex.pm/packages/burrito) wraps a Mix release into a self-contained executable that bundles the Erlang runtime. No Elixir/Erlang needed on the target robot.
+**Burrito** bundles the Erlang runtime into a self-contained executable. No Elixir/Erlang needed on the target robot.
 
-Add to the example module's `mix.exs`:
 ```elixir
-def project do
-  [
-    releases: [
-      my_sensor: [
-        steps: [:assemble, &Burrito.wrap/1],
-        burrito: [
-          targets: [
-            linux: [os: :linux, cpu: :x86_64],
-            linux_arm: [os: :linux, cpu: :aarch64],
-          ]
-        ]
+releases: [
+  my_module: [
+    steps: [:assemble, &Burrito.wrap/1],
+    burrito: [
+      targets: [
+        linux: [os: :linux, cpu: :x86_64],
+        linux_arm: [os: :linux, cpu: :aarch64]
       ]
     ]
   ]
-end
+]
 ```
 
-Build:
 ```bash
 MIX_ENV=prod mix release
-# Produces: burrito_out/my_sensor (standalone binary)
+# Produces: burrito_out/my_module (standalone binary)
 ```
 
 ---
 
 ## Testing Approach (TDD)
 
-### Reference
-- **Python SDK** uses in-process gRPC channels (`grpclib.testing.ChannelFor`) — no real network; client and fake server run in the same test process. Fake services live in `tests/mocks/`.
-- **Go RDK** uses struct injection (inject package with overrideable function fields) — allows mixing real and fake components. Also supports spinning up a real server subprocess for integration tests.
+Three tiers:
 
-### Elixir TDD Strategy
-
-**Unit tests** (pure logic, no gRPC): test message encoding, response parsing, resource type filtering — no server needed.
-
-**Integration tests** (client ↔ fake server in-process): spin up a `GRPC.Server` on a random port in `setup`, connect a `GRPC.Stub` to it, tear down in `on_exit`. This mirrors the Python SDK's `ChannelFor` pattern and is the primary test vehicle.
+### 1. In-process tests (primary)
+Fake gRPC servers using `GRPC.Server.Supervisor.child_spec/2` + `start_supervised!/1` — server is linked to the test supervisor, cleaned up automatically. No `on_exit` needed.
 
 ```elixir
-# test/support/fake_robot_server.ex
-defmodule ViamSdk.Test.FakeRobotServer do
-  use GRPC.Server, service: Viam.Robot.V1.RobotService
-
-  def resource_names(_req, _stream) do
-    %Viam.Robot.V1.ResourceNamesResponse{resources: [...]}
-  end
-end
-
-# test/viam_sdk/robot_test.exs
-setup do
-  {:ok, _, port} = GRPC.Server.start(ViamSdk.Test.FakeRobotServer, 0)
-  on_exit(fn -> GRPC.Server.stop(ViamSdk.Test.FakeRobotServer) end)
-  {:ok, port: port}
-end
-
-test "resource_names returns list", %{port: port} do
+setup_all do
+  child_spec = GRPC.Server.Supervisor.child_spec([ViamSdk.Test.FakeRobotServer], 0)
+  start_supervised!(child_spec)
+  {:ranch_embedded_sup, listener_ref} = child_spec.id
+  port = :ranch.get_port(listener_ref)
   {:ok, robot} = ViamSdk.connect("localhost:#{port}", transport: :grpc)
-  assert {:ok, [%{name: "fake-sensor"}]} = ViamSdk.resource_names(robot)
+  {:ok, robot: robot}
 end
 ```
 
-**Module tests** (Phase 3): flip the relationship — the test acts as a fake viam-server parent, connects to the module's gRPC server, and exercises `AddResource` / component RPCs.
+### 2. End-to-end tests (`@tag :integration`)
+`ViamServerHelper.start!/0` spawns a real `viam-server` process, parses the `serving {"url":"http://...:PORT"}` log line to get the dynamically assigned port, and registers cleanup via OS PID capture + SIGTERM/SIGKILL.
 
-### Test Files
+```bash
+mix test --include integration
+```
+
+### 3. Module tests (Phase 3)
+Test acts as a fake viam-server parent. Connects to the module's gRPC server and exercises `AddResource` / component RPCs. Fake parent server in `test/support/fake_parent_server.ex`.
+
+### Test files
 ```
 test/
   support/
-    fake_robot_server.ex      ← Fake RobotService for client tests
-    fake_sensor_server.ex     ← Fake SensorService for client tests
-    fake_parent_server.ex     ← Fake viam-server parent for module tests (Phase 3)
+    fake_robot_server.ex      ← Fake RobotService
+    fake_sensor_server.ex     ← Fake SensorService
+    viam_server_helper.ex     ← Real viam-server process helper
+    fake_parent_server.ex     ← Fake viam-server parent (Phase 3)
   viam_sdk/
-    robot_test.exs            ← ViamSdk.connect, resource_names
-    sensor_test.exs           ← get_readings, response decoding
+    robot_test.exs            ← connect, resource_names (13 tests total, all passing)
+    sensor_test.exs           ← get_readings, value decoding
+    integration_test.exs      ← @tag :integration; real viam-server
   viam_sdk/module/
     server_test.exs           ← Module ready handshake, AddResource (Phase 3)
 ```
-
-**End-to-end tests against real viam-server** (optional, requires `viam-server` in `PATH`): spin up a real `viam-server` process using a committed `test/fixtures/fake_robot.json` config that has one of every built-in fake component (`"model": "fake"`). Use `ExUnit`'s `@tag :integration` to keep these separate from unit/integration tests. The test config uses the minimal subset of fake components and the server binds to a random port passed via env var.
-
-```json
-// test/fixtures/fake_robot.json
-{
-  "network": { "bind_address": ":${TEST_PORT}" },
-  "components": [
-    { "name": "sensor1", "model": "fake", "api": "rdk:component:sensor", "attributes": {} },
-    { "name": "arm1", "model": "fake", "api": "rdk:component:arm", "attributes": { "arm-model": "fake" } },
-    { "name": "motor1", "model": "fake", "api": "rdk:component:motor", "attributes": {} },
-    { "name": "base1", "model": "fake", "api": "rdk:component:base", "attributes": {} },
-    { "name": "camera1", "model": "fake", "api": "rdk:component:camera", "attributes": {} },
-    { "name": "gripper1", "model": "fake", "api": "rdk:component:gripper", "attributes": {} },
-    { "name": "movement_sensor1", "model": "fake", "api": "rdk:component:movement_sensor", "attributes": {} },
-    { "name": "power_sensor1", "model": "fake", "api": "rdk:component:power_sensor", "attributes": {} }
-  ]
-}
-```
-
-The test helper starts `viam-server -config test/fixtures/fake_robot.json` in a `setup_all`, waits for it to be healthy, connects with `ViamSdk.connect/1`, runs every client method against the fake resources, and shuts down in `on_exit`.
-
-```elixir
-@tag :integration
-test "sensor get_readings against real viam-server" do
-  {:ok, data} = ViamSdk.get_readings(@robot, "sensor1")
-  assert is_map(data)
-  assert Map.has_key?(data, "a")
-end
-```
-
-Run integration tests with: `mix test --include integration`
-
-Write tests first for:
-1. Connecting to a fake server and getting resource names
-2. `get_readings` returning a map of decoded sensor values
-3. Module `Ready` handshake with fake parent (Phase 3)
-4. (Integration) Every client method against real viam-server fake components
 
 ---
 
 ## Verification
 
-### Phase 1
+### Current state
 ```bash
-mix deps.get && mix compile
-mix test
-
-# Against real viam-server:
-iex -S mix
-{:ok, robot} = ViamSdk.connect("localhost:8080", transport: :grpc)
-{:ok, names} = ViamSdk.resource_names(robot)
-{:ok, data}  = ViamSdk.get_readings(robot, hd(names).name)
+mix test                      # 8 unit/in-process tests — all pass
+mix test --include integration # 13 tests total — all pass (requires viam-server in PATH)
 ```
 
 ### Phase 3
 ```bash
-cd examples/my_sensor
+cd examples/my_module
 MIX_ENV=prod mix release
 # Register the module in robot config, observe viam-server loading it
 ```
-
-Default viam-server gRPC port: **8080**

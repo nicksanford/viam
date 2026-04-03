@@ -1,10 +1,11 @@
 defmodule ViamSdk.SensorTest do
   use ExUnit.Case, async: false
 
-  import ViamSdk.Test.ServerHelpers
-
-  setup do
-    {_server, port} = start_server(ViamSdk.Test.FakeSensorServer)
+  setup_all do
+    child_spec = GRPC.Server.Supervisor.child_spec([ViamSdk.Test.FakeSensorServer], 0)
+    start_supervised!(child_spec)
+    {:ranch_embedded_sup, listener_ref} = child_spec.id
+    port = :ranch.get_port(listener_ref)
     {:ok, robot} = ViamSdk.connect("localhost:#{port}", transport: :grpc)
     on_exit(fn -> if Process.alive?(robot), do: GenServer.stop(robot) end)
     {:ok, robot: robot}

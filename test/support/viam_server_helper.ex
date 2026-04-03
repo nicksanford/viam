@@ -1,5 +1,6 @@
 defmodule ViamSdk.Test.ViamServerHelper do
   @moduledoc false
+  require Logger
 
   @config_path Path.expand("../fixtures/fake_robot.json", __DIR__)
   @ready_pattern ~r/"url":"http:\/\/[^:]+:(\d+)"/
@@ -11,14 +12,19 @@ defmodule ViamSdk.Test.ViamServerHelper do
   Registers an on_exit handler to kill the process after the test case.
   Raises if viam-server does not start within #{@startup_timeout_ms}ms.
   """
-  @spec start!() :: non_neg_integer()
+  @spec start!() :: {port(), non_neg_integer()}
   def start! do
     port = open_port()
     grpc_port = wait_for_ready(port)
 
-    ExUnit.Callbacks.on_exit(fn -> stop(port) end)
+    # Capture the OS PID now, while the port is alive and owned by this process.
+    # By the time on_exit runs, the port's owner process will have exited and
+    # Port.info/2 would return nil.
+    {:os_pid, os_pid} = Port.info(port, :os_pid)
 
-    grpc_port
+    ExUnit.Callbacks.on_exit(fn -> stop_os_process(os_pid) end)
+
+    {port, grpc_port}
   end
 
   defp open_port do
@@ -41,7 +47,11 @@ defmodule ViamSdk.Test.ViamServerHelper do
     now = System.monotonic_time(:millisecond)
 
     if now > deadline do
-      Port.close(port)
+      case Port.info(port, :os_pid) do
+        {:os_pid, os_pid} -> stop_os_process(os_pid)
+        nil -> :ok
+      end
+
       raise "viam-server did not start within #{@startup_timeout_ms}ms. Output:\n#{acc}"
     end
 
@@ -62,20 +72,35 @@ defmodule ViamSdk.Test.ViamServerHelper do
     end
   end
 
-  defp stop(port) do
-    case Port.info(port, :os_pid) do
-      {:os_pid, pid} ->
-        System.cmd("kill", [to_string(pid)], stderr_to_stdout: true)
+  @sigterm_timeout_ms 5_000
 
-      nil ->
-        :ok
+  defp stop_os_process(os_pid) do
+    pid_str = to_string(os_pid)
+    System.cmd("kill", ["-TERM", pid_str], stderr_to_stdout: true)
+
+    unless wait_for_os_exit(os_pid, @sigterm_timeout_ms) do
+      Logger.warning("viam-server (pid #{os_pid}) did not exit after SIGTERM, sending SIGKILL")
+      System.cmd("kill", ["-KILL", pid_str], stderr_to_stdout: true)
     end
+  end
 
-    # Port closes automatically when the OS process exits; ignore if already closed.
-    try do
-      Port.close(port)
-    rescue
-      ArgumentError -> :ok
+  defp wait_for_os_exit(os_pid, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+    do_wait(os_pid, deadline)
+  end
+
+  defp do_wait(os_pid, deadline) do
+    case System.cmd("kill", ["-0", to_string(os_pid)], stderr_to_stdout: true) do
+      {_, 0} ->
+        if System.monotonic_time(:millisecond) < deadline do
+          Process.sleep(100)
+          do_wait(os_pid, deadline)
+        else
+          false
+        end
+
+      {_, _} ->
+        true
     end
   end
 end

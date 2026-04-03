@@ -6,7 +6,7 @@ defmodule ViamSdk.IntegrationTest do
   alias Viam.Common.V1.ResourceName
 
   setup_all do
-    grpc_port = ViamSdk.Test.ViamServerHelper.start!()
+    {_port, grpc_port} = ViamSdk.Test.ViamServerHelper.start!()
     {:ok, robot} = ViamSdk.connect("localhost:#{grpc_port}", transport: :grpc)
     {:ok, robot: robot}
   end
@@ -23,7 +23,8 @@ defmodule ViamSdk.IntegrationTest do
       assert {:ok, names} = ViamSdk.resource_names(robot)
       component_names = Enum.map(names, & &1.name)
 
-      for expected <- ~w[sensor1 arm1 motor1 base1 camera1 gripper1 movement_sensor1 power_sensor1] do
+      for expected <-
+            ~w[sensor1 arm1 motor1 base1 camera1 gripper1 movement_sensor1 power_sensor1] do
         assert expected in component_names,
                "Expected #{expected} in resource names, got: #{inspect(component_names)}"
       end
